@@ -1,0 +1,27 @@
+# ===== Node / React =====
+node_modules/
+npm-debug.log*
+yarn-error.log*
+build/
+dist/
+
+# ===== Python / FastAPI =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+.venv/
+env/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Editor =====
+.vscode/
+.idea/
+
+# ===== Logs =====
+*.log
