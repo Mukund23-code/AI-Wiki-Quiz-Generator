@@ -17,7 +17,6 @@ function App() {
   // History state
   const [history, setHistory] = useState([]);
   const [selectedQuiz, setSelectedQuiz] = useState(null);
-  const [showModal, setShowModal] = useState(false);
 
   const generateQuiz = async () => {
     if (!url) {
@@ -75,6 +74,7 @@ function App() {
   useEffect(() => {
     if (activeTab === "history") {
       loadHistory();
+      setSelectedQuiz(null); // Clear selection when switching to history tab
     }
   }, [activeTab]);
 
@@ -110,15 +110,9 @@ function App() {
     setError("");
   };
 
-  const openQuizModal = (quizData) => {
+  const selectQuiz = (quizData) => {
     setSelectedQuiz(quizData);
-    setShowModal(true);
-  };
-
-  const closeModal = () => {
-    setShowModal(false);
-    setSelectedQuiz(null);
-  };
+  }
 
   return (
     <div className="app-container">
@@ -278,97 +272,110 @@ function App() {
         </div>
       )}
 
-      {/* TAB 2: HISTORY */}
+      {/* TAB 2: HISTORY - Split Layout */}
       {activeTab === "history" && (
-        <div className="content">
+        <div className="content history-content">
           <h2 className="section-title">Past Quizzes</h2>
           
           {history.length === 0 ? (
             <p className="empty-state">No quizzes yet. Generate your first quiz!</p>
           ) : (
-            <div className="table-container">
-              <table className="history-table">
-                <thead>
-                  <tr>
-                    <th></th>
-                    <th className="tableHeader">Title</th>
-                    <th className="tableHeader">URL</th>
-                    <th className="tableHeader">Questions</th>
-                    <th className="tableHeader">Action</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {history.map((item) => (
-                    <tr key={item.id}>
-                      <td>{item.id}</td>
-                      <td className="tableSpacing">{item.title}</td>
-                      <td className="tableSpacing">
-                        <a href={item.url} target="_blank" rel="noopener noreferrer" className="table-link">
-                          View Article
-                        </a>
-                      </td>
-                      <td className="tableSpacing">{item.quiz_data.questions?.length || 0}</td>
-                      <td className="tableSpacing">
-                        <button
-                          onClick={() => openQuizModal(item)}
-                          className="detail-btn"
+            <div className="history-layout">
+              {/* LEFT SIDE - Quiz List */}
+              <div className="history-list">
+                <div className="table-container">
+                  <table className="history-table">
+                    <thead>
+                      <tr>
+                        <th className="tableHeader">Title</th>
+                        <th className="tableHeader">Questions</th>
+                        <th className="tableHeader">Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {history.map((item, index) => (
+                        <tr 
+                          key={index}
+                          className={selectedQuiz === item ? "selected-row" : ""}
                         >
-                          View Details
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+                          <td className="tableSpacing">{item.title}</td>
+                          <td className="tableSpacing center">{item.quiz_data.questions?.length || 0}</td>
+                          <td className="tableSpacing center">
+                            <button
+                              onClick={() => selectQuiz(item)}
+                              className={`detail-btn ${selectedQuiz === item ? "active" : ""}`}
+                            >
+                              {selectedQuiz === item ? "✓ Selected" : "View Details"}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* RIGHT SIDE - Quiz Details */}
+              <div className="history-details">
+                {!selectedQuiz ? (
+                  <div className="no-selection">
+                    <div className="no-selection-icon">📋</div>
+                    <h3>Select a Quiz</h3>
+                    <p>Click "View Details" on any quiz to see the questions</p>
+                  </div>
+                ) : (
+                  <div className="detail-content">
+                    <div className="detail-header">
+                      <h2 className="detail-title">{selectedQuiz.title}</h2>
+                      <a 
+                        href={selectedQuiz.url} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        className="detail-link"
+                      >
+                        🔗 View Article
+                      </a>
+                    </div>
+                    
+                    <div className="detail-questions">
+                      {selectedQuiz.quiz_data.questions?.map((q, i) => (
+                        <div key={i} className="detail-question-card">
+                          <div className="detail-question-header">
+                            <span className="question-number">Question {i + 1}</span>
+                            <span className="difficulty-badge">{q.difficulty}</span>
+                          </div>
+                          
+                          <p className="detail-question-text">{q.question}</p>
+                          
+                          <div className="detail-options">
+                            {q.options.map((opt, j) => (
+                              <div
+                                key={j}
+                                className={`detail-option ${opt.is_correct ? "correct-option" : ""}`}
+                              >
+                                <span className="option-label">{String.fromCharCode(65 + j)}.</span>
+                                <span className="option-text">{opt.text}</span>
+                                {opt.is_correct && <span className="checkmark">✓</span>}
+                              </div>
+                            ))}
+                          </div>
+                          
+                          {q.explanation && (
+                            <p className="detail-explanation">
+                              <strong>💡 Explanation:</strong> {q.explanation}
+                            </p>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
           )}
         </div>
       )}
-
-      {/* MODAL */}
-      {showModal && selectedQuiz && (
-        <div className="modal-overlay" onClick={closeModal}>
-          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
-            <button onClick={closeModal} className="modal-close">✕</button>
-            
-            <h2 className="modal-title">{selectedQuiz.title}</h2>
-            <a href={selectedQuiz.url} target="_blank" rel="noopener noreferrer" className="modal-link">
-              🔗 View Wikipedia Article
-            </a>
-            
-            <div className="modal-questions">
-              {selectedQuiz.quiz_data.questions?.map((q, i) => (
-                <div key={i} className="modal-question-card">
-                  <div className="modal-question-header">
-                    <span className="question-number">Q{i + 1}</span>
-                    <span className="difficulty-badge">{q.difficulty}</span>
-                  </div>
-                  
-                  <p className="modal-question-text">{q.question}</p>
-                  
-                  <div className="modal-options">
-                    {q.options.map((opt, j) => (
-                      <div
-                        key={j}
-                        className={`modal-option ${opt.is_correct ? "correct-option" : ""}`}
-                      >
-                        {String.fromCharCode(65 + j)}. {opt.text}
-                        {opt.is_correct && <span className="checkmark"> ✓</span>}
-                      </div>
-                    ))}
-                  </div>
-                  
-                  {q.explanation && (
-                    <p className="modal-explanation">
-                      <strong>💡 Explanation:</strong> {q.explanation}
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
-  );}
+  );
+};
 export default App;
