@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import requests, os, json, re
+import requests, os, json, re, random
 from bs4 import BeautifulSoup
 from sqlalchemy.orm import Session
 from database import SessionLocal, Base, engine
@@ -18,7 +18,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["*"],  # Changed to allow all origins for deployment
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,6 +45,37 @@ class QuizRequest(BaseModel):
     difficulty: str = "easy"
     number_of_questions: int = 5
 
+# ---------------- Helper Function ----------------
+def shuffle_options(questions):
+    """Shuffle options for each question while preserving the correct answer"""
+    for question in questions:
+        # Find the correct answer before shuffling
+        correct_answer = None
+        for opt in question.get("options", []):
+            if isinstance(opt, dict) and opt.get("is_correct"):
+                correct_answer = opt["text"]
+                break
+        
+        # If options are already in the correct format (list of dicts)
+        if question.get("options") and isinstance(question["options"][0], dict):
+            options = question["options"]
+            random.shuffle(options)
+            question["options"] = options
+        # If options need to be converted (list of strings with "answer" key)
+        elif "answer" in question:
+            correct_answer = question["answer"]
+            options_list = question.get("options", [])
+            # Shuffle the options
+            random.shuffle(options_list)
+            # Convert to frontend format
+            question["options"] = [
+                {"text": opt, "is_correct": opt == correct_answer} 
+                for opt in options_list
+            ]
+            question.pop("answer", None)
+    
+    return questions
+
 # ---------------- Endpoints ----------------
 @app.get("/")
 def root():
@@ -68,69 +99,72 @@ def generate_quiz(data: QuizRequest, db: Session = Depends(get_db)):
     title_tag = soup.find("h1", class_="firstHeading") or soup.find("h1")
     article_title = title_tag.get_text().strip() if title_tag else "Wikipedia Article"
     
-    # INCREASED: More paragraphs and characters for better context, especially for 10 questions
+    # Extract more content based on number of questions
+    num_paragraphs = 15 if data.number_of_questions <= 5 else 25
+    max_chars = 6000 if data.number_of_questions <= 5 else 10000
+    
     paragraphs = [p.get_text().strip() for p in soup.find_all("p") if len(p.get_text().strip()) > 50]
-    article_text = "\n".join(paragraphs[:20])[:8000]  # 20 paragraphs, max 8000 chars
+    article_text = "\n".join(paragraphs[:num_paragraphs])[:max_chars]
 
     if not article_text:
         raise HTTPException(400, "No article text found in the page")
 
-    print(f"\n📊 Article Stats:")
+    print(f"\n{'='*60}")
+    print(f"📊 QUIZ GENERATION REQUEST")
+    print(f"{'='*60}")
     print(f"   Title: {article_title}")
     print(f"   Content length: {len(article_text)} characters")
-    print(f"   Requested questions: {data.number_of_questions}")
+    print(f"   Questions requested: {data.number_of_questions}")
+    print(f"   Difficulty: {data.difficulty}")
+    print(f"{'='*60}\n")
 
-    # ---------------- Prepare LLM prompt ----------------
-    prompt = f"""You are a quiz generator. Based on the following Wikipedia article about "{article_title}", generate exactly {data.number_of_questions} multiple-choice questions.
+    # ---------------- Prepare LLM prompt with difficulty-specific instructions ----------------
+    difficulty_instructions = {
+        "easy": "Focus on basic facts, definitions, and main concepts that are explicitly stated.",
+        "medium": "Include questions that require understanding relationships between concepts and some inference.",
+        "hard": "Create questions that require deep understanding, analysis, and connecting multiple pieces of information."
+    }
+
+    prompt = f"""You are an expert quiz generator. Create {data.number_of_questions} UNIQUE multiple-choice questions based on this Wikipedia article about "{article_title}".
 
 Article Content:
 {article_text}
 
-CRITICAL INSTRUCTIONS - FOLLOW EXACTLY:
-1. Generate EXACTLY {data.number_of_questions} questions - no more, no less
-2. Each question MUST have exactly 4 options (A, B, C, D)
-3. Base questions on SPECIFIC FACTS from the article (dates, names, events, definitions, etc.)
-4. Make each question UNIQUE - cover different aspects of the article
-5. Difficulty level: {data.difficulty}
-6. Provide a brief explanation for each correct answer
-7. Ensure all 4 options are plausible but only ONE is correct
-8. DO NOT use generic or repeated question templates
+CRITICAL REQUIREMENTS:
+1. Generate EXACTLY {data.number_of_questions} questions - NO MORE, NO LESS
+2. Difficulty Level: {data.difficulty} - {difficulty_instructions[data.difficulty]}
+3. Each question MUST have EXACTLY 4 different options
+4. Questions must be UNIQUE - cover different topics, facts, dates, people, events from the article
+5. Base ALL questions on SPECIFIC FACTS from the article above
+6. Make incorrect options plausible but clearly wrong
+7. Provide clear explanations referencing the article
 
-IMPORTANT: You must generate all {data.number_of_questions} questions. If the article is long enough, create questions about:
-- Main subject/topic
-- Key dates and events
-- Important people mentioned
-- Definitions and concepts
+QUESTION VARIETY - Cover different aspects:
+- Key facts and definitions
+- Important dates and events
+- People and their roles
 - Causes and effects
 - Locations and geography
 - Historical context
-- Related information
+- Comparisons and relationships
 
-Return ONLY a valid JSON object with NO markdown formatting, NO code blocks, NO extra text.
-
-Use this EXACT format:
+STRICT FORMAT REQUIREMENT:
+Return ONLY valid JSON with NO markdown, NO code blocks, NO extra text.
 
 {{
   "questions": [
     {{
-      "question": "What year was [specific event] mentioned in the article?",
-      "options": ["1950", "1960", "1970", "1980"],
-      "answer": "1960",
+      "question": "Specific factual question from the article?",
+      "options": ["Correct answer from article", "Plausible wrong option 1", "Plausible wrong option 2", "Plausible wrong option 3"],
+      "answer": "Correct answer from article",
       "difficulty": "{data.difficulty}",
-      "explanation": "According to the article, [specific fact]."
-    }},
-    {{
-      "question": "Who is described as [specific role] in the article?",
-      "options": ["Person A", "Person B", "Person C", "Person D"],
-      "answer": "Person B",
-      "difficulty": "{data.difficulty}",
-      "explanation": "The article states that [specific fact]."
+      "explanation": "According to the article, [specific fact that answers the question]."
     }}
   ],
   "related_topics": ["Topic1", "Topic2", "Topic3"]
 }}
 
-Generate EXACTLY {data.number_of_questions} complete questions now.
+IMPORTANT: All {data.number_of_questions} questions must be based on DIFFERENT information from the article. Generate exactly {data.number_of_questions} complete questions now.
 """
 
     # ---------------- Call Gemini API ----------------
@@ -138,6 +172,11 @@ Generate EXACTLY {data.number_of_questions} complete questions now.
     
     if GEMINI_API_KEY:
         try:
+            # Adjust parameters based on number of questions
+            max_tokens = 2048 if data.number_of_questions <= 5 else (
+                4096 if data.number_of_questions <= 7 else 8192
+            )
+            
             gemini_payload = {
                 "contents": [{
                     "parts": [{
@@ -145,161 +184,143 @@ Generate EXACTLY {data.number_of_questions} complete questions now.
                     }]
                 }],
                 "generationConfig": {
-                    "temperature": 0.9,  # Higher temperature for more variety
-                    "maxOutputTokens": 8192,  # INCREASED: Support for 10 questions needs more tokens
+                    "temperature": 0.85,  # High variety but controlled
+                    "maxOutputTokens": max_tokens,
                     "topP": 0.95,
                     "topK": 40
                 }
             }
             
-            print(f"\n🤖 Calling Gemini API...")
+            print(f"🤖 Calling Gemini API (max_tokens={max_tokens})...")
             gemini_response = requests.post(
                 f"{GEMINI_URL}?key={GEMINI_API_KEY}",
                 json=gemini_payload,
                 headers={"Content-Type": "application/json"},
-                timeout=60  # INCREASED: Longer timeout for 10 questions
+                timeout=60
             )
             
-            print(f"   Status Code: {gemini_response.status_code}")
+            print(f"   Response Status: {gemini_response.status_code}")
             
             if gemini_response.status_code == 200:
                 response_json = gemini_response.json()
                 raw_text = response_json["candidates"][0]["content"]["parts"][0]["text"]
                 
                 print(f"   Response length: {len(raw_text)} characters")
-                print(f"\n===== FIRST 1000 CHARS OF GEMINI OUTPUT =====")
-                print(raw_text[:1000])
-                print("=" * 50)
                 
-                # Clean and extract JSON - improved regex
+                # Clean JSON
                 raw_text = raw_text.strip()
-                # Remove markdown code blocks
                 raw_text = re.sub(r'^```(?:json)?\s*', '', raw_text, flags=re.MULTILINE)
                 raw_text = re.sub(r'\s*```$', '', raw_text, flags=re.MULTILINE)
                 raw_text = raw_text.strip()
                 
-                # Try to parse directly first
+                # Parse JSON
                 try:
                     quiz_json = json.loads(raw_text)
-                    print(f"✓ Direct JSON parse successful")
+                    print(f"   ✓ JSON parsed successfully")
                 except json.JSONDecodeError as e:
-                    print(f"⚠️ Direct parse failed: {e}")
-                    # If that fails, try to extract JSON object
+                    print(f"   ⚠️ Direct parse failed, trying regex extraction...")
                     match = re.search(r'\{[\s\S]*\}', raw_text)
                     if match:
                         try:
                             quiz_json = json.loads(match.group())
-                            print(f"✓ Regex extraction parse successful")
+                            print(f"   ✓ Regex extraction successful")
                         except json.JSONDecodeError as e2:
-                            print(f"✗ Regex parse also failed: {e2}")
+                            print(f"   ✗ Regex parse failed: {e2}")
                 
                 # Validate structure
                 if quiz_json and "questions" in quiz_json:
                     num_generated = len(quiz_json["questions"])
                     print(f"\n📝 Generated {num_generated} questions (requested: {data.number_of_questions})")
                     
-                    if num_generated >= data.number_of_questions:
-                        # Trim to exact number requested
-                        quiz_json["questions"] = quiz_json["questions"][:data.number_of_questions]
-                        print(f"✓ Successfully generated {len(quiz_json['questions'])} questions from Gemini")
-                    elif num_generated >= data.number_of_questions * 0.7:  # At least 70% of requested
-                        print(f"⚠️ Generated {num_generated} questions, requested {data.number_of_questions} - using what we have")
-                        # Use what we got, it's better than fallback
+                    # Validate each question has 4 options
+                    valid_questions = []
+                    for i, q in enumerate(quiz_json["questions"]):
+                        if "options" in q and len(q["options"]) == 4 and "answer" in q:
+                            valid_questions.append(q)
+                        else:
+                            print(f"   ⚠️ Question {i+1} invalid (wrong number of options or missing answer)")
+                    
+                    if len(valid_questions) >= data.number_of_questions:
+                        quiz_json["questions"] = valid_questions[:data.number_of_questions]
+                        print(f"   ✓ Using {len(quiz_json['questions'])} valid questions")
+                    elif len(valid_questions) >= int(data.number_of_questions * 0.6):  # At least 60%
+                        quiz_json["questions"] = valid_questions
+                        print(f"   ⚠️ Only got {len(valid_questions)} valid questions, using them")
                     else:
-                        print(f"✗ Only got {num_generated} questions, need at least {int(data.number_of_questions * 0.7)}")
+                        print(f"   ✗ Not enough valid questions ({len(valid_questions)}/{data.number_of_questions})")
                         quiz_json = None
                 else:
-                    print(f"✗ Invalid quiz structure from Gemini")
-                    if quiz_json:
-                        print(f"   Keys found: {quiz_json.keys() if isinstance(quiz_json, dict) else 'Not a dict'}")
+                    print(f"   ✗ Invalid quiz structure")
                     quiz_json = None
+                    
             else:
                 error_text = gemini_response.text
-                print(f"✗ Gemini API Error ({gemini_response.status_code}): {error_text[:500]}")
+                print(f"   ✗ API Error ({gemini_response.status_code}): {error_text[:200]}")
                 
         except requests.exceptions.Timeout:
-            print("⏱ Gemini API timeout - using fallback")
-        except json.JSONDecodeError as e:
-            print(f"✗ JSON parsing error: {e}")
-            print(f"   Raw text preview: {raw_text[:500]}")
+            print("   ⏱ API timeout")
         except Exception as e:
-            print(f"✗ Gemini API call failed: {type(e).__name__}: {e}")
+            print(f"   ✗ Exception: {type(e).__name__}: {str(e)[:200]}")
     else:
-        print("⚠️ No API key - using fallback")
+        print("⚠️ No API key configured")
 
-    # ---------------- Improved Fallback with article-based questions ----------------
+    # ---------------- Enhanced Fallback ----------------
     if not quiz_json:
-        print(f"\n⚠️ Using fallback question generation for {data.number_of_questions} questions")
+        print(f"\n⚠️ Using fallback for {data.number_of_questions} questions\n")
         
-        # Extract meaningful sentences from the article
-        sentences = [s.strip() + '.' for s in article_text.split('.') if len(s.strip()) > 40]
+        # Extract sentences and key information
+        sentences = [s.strip() for s in article_text.split('.') if len(s.strip()) > 60][:data.number_of_questions * 3]
         
-        # More diverse question templates
-        question_templates = [
-            "According to the article about {topic}, what is mentioned regarding {aspect}?",
-            "What key fact about {topic} is stated in the article?",
-            "The article discusses {topic}. Which detail is provided?",
-            "What information does the article give about {topic}?",
-            "Which statement about {topic} is accurate according to the article?",
-            "The article mentions {topic}. What is a key point?",
-            "What does the article reveal about {topic}?",
-            "According to the Wikipedia article, what is true about {topic}?",
-            "Which of the following facts about {topic} appears in the article?",
-            "What aspect of {topic} does the article cover?"
+        # Diverse question templates
+        templates = [
+            ("What does the article state about {topic}?", "content"),
+            ("According to the article, which fact about {topic} is accurate?", "fact"),
+            ("What information is provided regarding {topic}?", "information"),
+            ("The article mentions {topic}. What is emphasized?", "emphasis"),
+            ("Which statement about {topic} is supported by the article?", "statement"),
+            ("What key detail about {topic} does the article include?", "detail"),
+            ("According to the Wikipedia article, what is true about {topic}?", "truth"),
+            ("The article discusses {topic}. What is highlighted?", "highlight"),
+            ("What aspect of {topic} does the article specifically address?", "aspect"),
+            ("Which characteristic of {topic} is described in the article?", "characteristic"),
         ]
         
-        # Generate varied distractor options
-        distractor_templates = [
-            "Information not covered in this article",
-            "An unrelated historical event",
-            "A different subject matter",
-            "Content from another topic",
-            "An alternative viewpoint not mentioned",
-            "A fact about a different subject",
-            "Information from a different article",
-            "An unrelated piece of information",
-            "A topic not discussed here",
-            "Content outside the article's scope"
+        # Generate diverse distractors
+        distractor_sets = [
+            ["Information not mentioned in the article", "An unrelated historical fact", "A different topic entirely"],
+            ["Content from another subject", "An incorrect interpretation", "A misattributed fact"],
+            ["Unrelated information", "A different time period", "An alternative topic"],
+            ["Information outside the article scope", "A contradicting statement", "An unmentioned detail"],
+            ["A topic not covered here", "Incorrect historical data", "Unrelated subject matter"],
         ]
         
         fallback_questions = []
         
-        # Generate questions using different parts of the article
         for i in range(data.number_of_questions):
             if i < len(sentences):
-                # Use different templates for variety
-                template = question_templates[i % len(question_templates)]
-                aspect = f"section {i+1}" if i > 0 else "the main topic"
-                
-                # Create varied distractors
-                distractors = [
-                    distractor_templates[j % len(distractor_templates)] 
-                    for j in range(i, i+3)
-                ]
-                
-                # Correct answer from article
-                correct_answer = sentences[i][:150] + "..." if len(sentences[i]) > 150 else sentences[i]
+                template, _ = templates[i % len(templates)]
+                correct = sentences[i][:120] + ("..." if len(sentences[i]) > 120 else "")
+                distractors = distractor_sets[i % len(distractor_sets)].copy()
                 
                 fallback_questions.append({
-                    "question": template.format(topic=article_title, aspect=aspect),
-                    "options": [correct_answer] + distractors,
-                    "answer": correct_answer,
+                    "question": template.format(topic=article_title),
+                    "options": [correct] + distractors,
+                    "answer": correct,
                     "difficulty": data.difficulty,
-                    "explanation": f"This information is directly stated in the Wikipedia article about {article_title}."
+                    "explanation": f"This information is stated in the article about {article_title}."
                 })
             else:
-                # Generic questions if not enough sentences
                 fallback_questions.append({
-                    "question": f"What is the primary subject of this Wikipedia article?",
+                    "question": f"What is this Wikipedia article primarily about?",
                     "options": [
-                        f"{article_title}",
-                        "A different historical period",
-                        "An unrelated geographic location",
-                        "A separate biographical subject"
+                        article_title,
+                        "An unrelated topic",
+                        "A different subject",
+                        "Another area of study"
                     ],
-                    "answer": f"{article_title}",
+                    "answer": article_title,
                     "difficulty": data.difficulty,
-                    "explanation": f"This article is primarily about {article_title}."
+                    "explanation": f"The article focuses on {article_title}."
                 })
         
         quiz_json = {
@@ -307,20 +328,11 @@ Generate EXACTLY {data.number_of_questions} complete questions now.
             "related_topics": [article_title, "Wikipedia", "General Knowledge"]
         }
         
-        print(f"✓ Generated {len(fallback_questions)} fallback questions")
+        print(f"✓ Fallback generated {len(fallback_questions)} questions")
 
-    # Final validation
-    if len(quiz_json["questions"]) < data.number_of_questions:
-        print(f"⚠️ Warning: Only have {len(quiz_json['questions'])} questions, requested {data.number_of_questions}")
-
-    # ---------------- Convert options to frontend format ----------------
-    for q in quiz_json["questions"]:
-        correct_answer = q.get("answer")
-        q["options"] = [
-            {"text": opt, "is_correct": opt == correct_answer} 
-            for opt in q.get("options", [])
-        ]
-        q.pop("answer", None)
+    # ---------------- Shuffle options and convert to frontend format ----------------
+    print(f"\n🔀 Shuffling options...")
+    quiz_json["questions"] = shuffle_options(quiz_json["questions"])
 
     # ---------------- Save to DB ----------------
     record = QuizHistory(
@@ -333,7 +345,8 @@ Generate EXACTLY {data.number_of_questions} complete questions now.
     db.commit()
     db.refresh(record)
 
-    print(f"\n✅ Quiz generation complete! Returning {len(quiz_json['questions'])} questions\n")
+    print(f"✅ Quiz complete! Returning {len(quiz_json['questions'])} questions")
+    print(f"{'='*60}\n")
 
     return {
         "title": article_title,
@@ -349,7 +362,7 @@ def get_history(db: Session = Depends(get_db)):
         {
             "url": r.url,
             "title": r.title,
-            "created_at": str(r.id),  # Using id as proxy for order
+            "created_at": str(r.id),
             "quiz_data": json.loads(r.quiz_json)
         }
         for r in records
