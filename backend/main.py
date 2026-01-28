@@ -76,6 +76,35 @@ def shuffle_options(questions):
     
     return questions
 
+def extract_json_from_text(text):
+    """Extract and parse JSON from potentially messy text"""
+    # Remove markdown code blocks
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\s*```$', '', text, flags=re.MULTILINE)
+    text = text.strip()
+    
+    # Try direct parse first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    
+    # Try to find JSON object with regex
+    matches = list(re.finditer(r'\{(?:[^{}]|(?:\{[^{}]*\}))*\}', text, re.DOTALL))
+    
+    # Try each match, starting from the largest
+    for match in sorted(matches, key=lambda m: len(m.group()), reverse=True):
+        try:
+            potential_json = match.group()
+            # Fix common JSON issues
+            potential_json = re.sub(r',(\s*[}\]])', r'\1', potential_json)  # Remove trailing commas
+            potential_json = re.sub(r'}\s*{', '},{', potential_json)  # Fix missing commas between objects
+            return json.loads(potential_json)
+        except json.JSONDecodeError:
+            continue
+    
+    return None
+
 # ---------------- Endpoints ----------------
 @app.get("/")
 def root():
@@ -206,26 +235,16 @@ IMPORTANT: All {data.number_of_questions} questions must be based on DIFFERENT i
                 raw_text = response_json["candidates"][0]["content"]["parts"][0]["text"]
                 
                 print(f"   Response length: {len(raw_text)} characters")
+                print(f"   First 200 chars: {raw_text[:200]}")
                 
-                # Clean JSON
-                raw_text = raw_text.strip()
-                raw_text = re.sub(r'^```(?:json)?\s*', '', raw_text, flags=re.MULTILINE)
-                raw_text = re.sub(r'\s*```$', '', raw_text, flags=re.MULTILINE)
-                raw_text = raw_text.strip()
+                # Try improved JSON extraction
+                quiz_json = extract_json_from_text(raw_text)
                 
-                # Parse JSON
-                try:
-                    quiz_json = json.loads(raw_text)
+                if quiz_json:
                     print(f"   ✓ JSON parsed successfully")
-                except json.JSONDecodeError as e:
-                    print(f"   ⚠️ Direct parse failed, trying regex extraction...")
-                    match = re.search(r'\{[\s\S]*\}', raw_text)
-                    if match:
-                        try:
-                            quiz_json = json.loads(match.group())
-                            print(f"   ✓ Regex extraction successful")
-                        except json.JSONDecodeError as e2:
-                            print(f"   ✗ Regex parse failed: {e2}")
+                else:
+                    print(f"   ✗ Could not extract valid JSON")
+                    print(f"   Raw response sample: {raw_text[:500]}")
                 
                 # Validate structure
                 if quiz_json and "questions" in quiz_json:
@@ -269,70 +288,66 @@ IMPORTANT: All {data.number_of_questions} questions must be based on DIFFERENT i
         print(f"\n⚠️ Using fallback for {data.number_of_questions} questions\n")
         
         # Extract sentences and key information
-        sentences = [s.strip() for s in article_text.split('.') if len(s.strip()) > 60][:data.number_of_questions * 3]
+        sentences = [s.strip() for s in article_text.split('.') if len(s.strip()) > 60]
         
-        # Diverse question templates
-        templates = [
-            ("What does the article state about {topic}?", "content"),
-            ("According to the article, which fact about {topic} is accurate?", "fact"),
-            ("What information is provided regarding {topic}?", "information"),
-            ("The article mentions {topic}. What is emphasized?", "emphasis"),
-            ("Which statement about {topic} is supported by the article?", "statement"),
-            ("What key detail about {topic} does the article include?", "detail"),
-            ("According to the Wikipedia article, what is true about {topic}?", "truth"),
-            ("The article discusses {topic}. What is highlighted?", "highlight"),
-            ("What aspect of {topic} does the article specifically address?", "aspect"),
-            ("Which characteristic of {topic} is described in the article?", "characteristic"),
-        ]
-        
-        # Generate diverse distractors
-        distractor_sets = [
-            ["Information not mentioned in the article", "An unrelated historical fact", "A different topic entirely"],
-            ["Content from another subject", "An incorrect interpretation", "A misattributed fact"],
-            ["Unrelated information", "A different time period", "An alternative topic"],
-            ["Information outside the article scope", "A contradicting statement", "An unmentioned detail"],
-            ["A topic not covered here", "Incorrect historical data", "Unrelated subject matter"],
-        ]
-        
+        # Generate smart fallback questions
         fallback_questions = []
         
+        # Try to create meaningful questions from article content
         for i in range(data.number_of_questions):
             if i < len(sentences):
-                template, _ = templates[i % len(templates)]
-                correct = sentences[i][:120] + ("..." if len(sentences[i]) > 120 else "")
-                distractors = distractor_sets[i % len(distractor_sets)].copy()
-                
-                fallback_questions.append({
-                    "question": template.format(topic=article_title),
-                    "options": [correct] + distractors,
-                    "answer": correct,
-                    "difficulty": data.difficulty,
-                    "explanation": f"This information is stated in the article about {article_title}."
-                })
-            else:
-                fallback_questions.append({
-                    "question": f"What is this Wikipedia article primarily about?",
-                    "options": [
-                        article_title,
-                        "An unrelated topic",
-                        "A different subject",
-                        "Another area of study"
-                    ],
-                    "answer": article_title,
-                    "difficulty": data.difficulty,
-                    "explanation": f"The article focuses on {article_title}."
-                })
+                sentence = sentences[i * 2] if i * 2 < len(sentences) else sentences[i]
+                # Extract a fact from the sentence (first 100 chars)
+                fact = sentence[:100].strip()
+                if fact:
+                    fallback_questions.append({
+                        "question": f"According to the article about {article_title}, which statement is accurate?",
+                        "options": [
+                            {"text": fact, "is_correct": True},
+                            {"text": "This information is not mentioned in the article", "is_correct": False},
+                            {"text": "The article discusses a different topic", "is_correct": False},
+                            {"text": "This fact is contradicted by the article", "is_correct": False}
+                        ],
+                        "difficulty": data.difficulty,
+                        "explanation": f"This information is directly stated in the article about {article_title}."
+                    })
+        
+        # Fill remaining questions if needed
+        while len(fallback_questions) < data.number_of_questions:
+            fallback_questions.append({
+                "question": f"What is the primary subject of this Wikipedia article?",
+                "options": [
+                    {"text": article_title, "is_correct": True},
+                    {"text": "An unrelated historical event", "is_correct": False},
+                    {"text": "A different scientific concept", "is_correct": False},
+                    {"text": "Another geographical location", "is_correct": False}
+                ],
+                "difficulty": data.difficulty,
+                "explanation": f"The article focuses on {article_title}."
+            })
         
         quiz_json = {
-            "questions": fallback_questions,
+            "questions": fallback_questions[:data.number_of_questions],
             "related_topics": [article_title, "Wikipedia", "General Knowledge"]
         }
         
         print(f"✓ Fallback generated {len(fallback_questions)} questions")
 
-    # ---------------- Shuffle options and convert to frontend format ----------------
+    # ---------------- Shuffle options (only if not already in correct format) ----------------
     print(f"\n🔀 Shuffling options...")
-    quiz_json["questions"] = shuffle_options(quiz_json["questions"])
+    
+    # Check if options are already in the correct format
+    needs_conversion = False
+    if quiz_json["questions"] and "answer" in quiz_json["questions"][0]:
+        needs_conversion = True
+    
+    if needs_conversion:
+        quiz_json["questions"] = shuffle_options(quiz_json["questions"])
+    else:
+        # Just shuffle the order, options are already in correct format
+        for question in quiz_json["questions"]:
+            if question.get("options"):
+                random.shuffle(question["options"])
 
     # ---------------- Save to DB ----------------
     record = QuizHistory(
